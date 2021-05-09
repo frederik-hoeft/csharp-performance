@@ -1,6 +1,7 @@
 # csharp-performance
 
-A collection of performance benchmarks comparing different components of the C# language.
+When coding I often find myself wondering which approaches to a given problem would be the fastest.
+So here's a collection of performance benchmarks comparing different components and approaches using the C# language.
 
 # Table of contents
 
