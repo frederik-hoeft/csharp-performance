@@ -13,13 +13,21 @@
       - [Unsafe.CopyBlockUnaligned()](#unsafecopyblockunaligned)
     - [Comparison](#comparison-1)
     - [Conclusion](#conclusion-1)
-  - [pmdbs2XNative.Security.MemoryProtection](#pmdbs2xnativesecuritymemoryprotection)
+  - [MemoryProtection](#memoryprotection)
     - [Results](#results-2)
       - [EncryptedMemory (Custom code / cross platform)](#encryptedmemory-custom-code--cross-platform)
       - [Win32EncryptedMemory (CryptProtectMemory() / DPAPI)](#win32encryptedmemory-cryptprotectmemory--dpapi)
       - [Win32ProtectedMemory (VirtualProtect() / no real encryption)](#win32protectedmemory-virtualprotect--no-real-encryption)
     - [Comparison](#comparison-2)
     - [Conclusion](#conclusion-2)
+  - [Memset](#memset)
+    - [Results](#results-3)
+      - [For-loop (naive approach)](#for-loop-naive-approach)
+      - [Unsafe for-loop / bit hacks](#unsafe-for-loop--bit-hacks)
+      - [Span.Fill()](#spanfill)
+      - [Unsafe.InitBlock()](#unsafeinitblock)
+    - [Comparison](#comparison-3)
+    - [Conclusion](#conclusion-3)
 
 ## Allocating heap memory
 
@@ -157,7 +165,7 @@ That's 0.00252497422 ms/it on average.
 
 `Unsafe.CopyBlock()` and `Unsafe.CopyBlockUnaligned()` are pretty much the same.
 
-## pmdbs2XNative.Security.MemoryProtection
+## MemoryProtection
 
 Using unoptimized Debug build (no debugger attached) on .NET 5.0.
 
@@ -223,4 +231,123 @@ That's 0.00067782 ms/it on average.
 
 ### Conclusion
 
-The custom, pure C# `EncryptedMemory` memory protection with AES256-CBC-HMAC-BLAKE2b encrytion is the slowest. The native Windows APIs `CryptProtectMemory()` from DP-API is about `163.9` faster than the custom `EncryptedMemory` implementation but is specific to Windows while `VirtualProtect()` is `1446.4` times faster but doesn't provide "real" cryptographic protection although it may however prevent tools like CheatEngine from reading process memory easily.
+The custom, pure C# `EncryptedMemory` memory protection with AES256-CBC-HMAC-BLAKE2b encrytion is the slowest. The native Windows APIs `CryptProtectMemory()` from DP-API is about `163.9` faster than the custom `EncryptedMemory` implementation but is specific to Windows while `VirtualProtect()` is `1446.4` times faster but doesn't provide "real" cryptographic protection although it may prevent tools like CheatEngine from reading process memory easily.
+
+## Memset
+
+
+Using unoptimized Debug build (no debugger attached) on .NET 5.0.
+
+Test program code:
+
+```csharp
+#define LOOP
+#if !LOOP
+//#define SPAN
+#if !SPAN
+//#define UNSAFE_LOOP
+#if !UNSAFE_LOOP
+#define UNSAFE
+#endif
+#endif
+#endif
+
+using System;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+
+const int length = 65536;
+const int iterations = 10_000_000;
+
+byte[] bytes = new byte[length];
+const byte targetValue = 0x1;
+
+Stopwatch stopwatch = new();
+stopwatch.Start();
+for (int _i = 0; _i < iterations; _i++)
+{
+#if LOOP
+    for (int i = 0; i < bytes.Length; i++)
+    {
+        bytes[i] = targetValue;
+    }
+#endif
+#if UNSAFE_LOOP
+    unsafe
+    {
+        fixed (byte* pBytes = bytes)
+        {
+            ulong* p = (ulong*)pBytes;
+            const ulong mask = (((ulong)targetValue) << 56)
+                | (((ulong)targetValue) << 48)
+                | (((ulong)targetValue) << 40)
+                | (((ulong)targetValue) << 32)
+                | (((ulong)targetValue) << 24)
+                | (((ulong)targetValue) << 16)
+                | (((ulong)targetValue) << 8)
+                | ((ulong)targetValue);
+            const int lengthInUlongs = length >> 3; // length / sizeof(ulong)
+            for (int i = 0; i < lengthInUlongs; i++, p++)
+            {
+                *p = mask;
+            }
+        }
+    }
+#endif
+#if SPAN
+    Span<byte> mySpan = new(bytes);
+    mySpan.Fill(targetValue);
+#endif
+#if UNSAFE
+    Unsafe.InitBlock(ref bytes[0], targetValue, (uint)bytes.Length);
+#endif
+}
+stopwatch.Stop();
+
+Console.WriteLine($"Completed {iterations} iterations in {stopwatch.Elapsed}.");
+Console.WriteLine($"That's {stopwatch.Elapsed.TotalMilliseconds / iterations} ms/it on average.");
+```
+
+### Results
+
+#### For-loop (naive approach)
+
+```text
+Completed 1000000 iterations in 00:02:37.7967102.
+That's 0.1577967102 ms/it on average.
+```
+
+#### Unsafe for-loop / bit hacks
+
+```text
+Completed 1000000 iterations in 00:00:17.8300668.
+That's 0.0178300668 ms/it on average.
+```
+
+#### Span.Fill()
+
+```text
+Completed 1000000 iterations in 00:00:02.0165365.
+That's 0.0020165365 ms/it on average.
+```
+
+#### Unsafe.InitBlock()
+
+```text
+Completed 1000000 iterations in 00:00:02.0116420.
+That's 0.002011642 ms/it on average.
+```
+
+### Comparison
+
+| Type | Total time | ms / it | relative to slowest |
+|---|---|---|---|
+| `For-loop` | `00:02:37.7967102` | `0.1577967102` | `1` |
+| `Unsafe for-loop` | `00:00:17.8300668` | `0.0178300668` | `8.85` |
+| `Span.Fill()` | `00:00:02.0165365` | `0.0020165365` | `78.25` |
+| `Unsafe.InitBlock()` | `00:00:02.0116420` | `0.002011642` | `78.44` |
+
+### Conclusion
+
+The typical `for` loop is the slowest which is to be expected. Interestingly enough the `unsafe`  `for` loop is about `8.85` faster while a performance improvement of `8` was to be expected (`sizeof(ulong) == 8 * sizeof(byte)`) meaning just omitting the out-of-bound checks by using pointers instead of managed array access results in an additional `85%` performance increase compared to the naive `for` loop approach.
+Both `Span.Fill()` and `Unsafe.InitBlock()` are about `78` times faster than the `for` loop where `Unsafe.InitBlock()` being the fastest while `Span.Fill()` providing the additional benefit of being type safe.
